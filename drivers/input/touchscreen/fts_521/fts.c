@@ -21,8 +21,7 @@
  * CONTENT OF SUCH SOFTWARE AND/OR THE USE MADE BY CUSTOMERS OF THE CODING
  * INFORMATION CONTAINED HEREIN IN CONNECTION WITH THEIR PRODUCTS.
  *
- * THIS SOFTWARE IS SPECIFICALLY DESIGNED FOR EXCLUSIVE USE WITH ST PARTS.
- */
+ * THIS SOFTWARE IS SPECIFICALLY DESIGNED FF
 
 /*!
 * \file fts.c
@@ -4961,7 +4960,7 @@ bool inline fts_touchmode_edgefilter(unsigned int touch_id, int x, int y)
 	return false;
 }
 
-int fts_read_touchmode_data()
+int fts_read_touchmode_data(void)
 {
 	int ret = 0;
 	u8 get_cmd[2] = {0xc1, 0x05};
