@@ -4,7 +4,6 @@
  * FTS Capacitive touch screen controller (FingerTipS)
  *
  * Copyright (C) 2016, STMicroelectronics Limited.
- * Copyright (C) 2019 XiaoMi, Inc.
  * Authors: AMG(Analog Mems Group)
  *
  * 		marco.cali@st.com
@@ -21,7 +20,8 @@
  * CONTENT OF SUCH SOFTWARE AND/OR THE USE MADE BY CUSTOMERS OF THE CODING
  * INFORMATION CONTAINED HEREIN IN CONNECTION WITH THEIR PRODUCTS.
  *
- * THIS SOFTWARE IS SPECIFICALLY DESIGNED FF
+ * THIS SOFTWARE IS SPECIFICALLY DESIGNED FOR EXCLUSIVE USE WITH ST PARTS.
+ */
 
 /*!
 * \file fts.c
@@ -55,7 +55,7 @@
 
 #include <linux/notifier.h>
 #ifdef CONFIG_DRM
-#include <drm/drm_notifier.h>
+#include <linux/msm_drm_notify.h>
 #endif
 #include <linux/backlight.h>
 
@@ -69,6 +69,7 @@
 #include <linux/input/mt.h>
 #endif
 #include "../xiaomi/xiaomi_touch.h"
+
 #include "fts.h"
 #include "fts_lib/ftsCompensation.h"
 #include "fts_lib/ftsCore.h"
@@ -151,7 +152,6 @@ static int fts_chip_initialization(struct fts_ts_info *info, int init_type);
 static const char *fts_get_limit(struct fts_ts_info *info);
 static irqreturn_t fts_event_handler(int irq, void *ts_info);
 extern void lpm_disable_for_input(bool on);
-extern void touch_irq_boost(void);
 
 /**
 * Release all the touches in the linux input subsystem
@@ -213,6 +213,24 @@ void release_all_touches(struct fts_ts_info *info)
  * X1X2X3X4 = 4 bytes in HEX format which represent an error code (00000000 no error) \n
  * } = end byte
  */
+
+#ifdef CONFIG_FTS_FOD_AREA_REPORT
+static bool fts_fingerprint_is_enable(void)
+{
+/* fod status = -1 as default value, means fingerprint is not enabled*
+ * fod_status = 100 as all fingers in the system is deleted
+ * fod_status = 0 means fingerpirint is not enabled
+ * fod_status = 1 means fingerprint is in authentication
+ * fod_status = 2 means fingerprint is in enroll
+ */
+	if (fts_info->fod_status != 0 && fts_info->fod_status != -1 && fts_info->fod_status != 100)
+		return true;
+	else
+		return false;
+}
+
+#endif
+
 static ssize_t fts_fwupdate_store(struct device *dev,
 				  struct device_attribute *attr,
 				  const char *buf, size_t count)
@@ -1231,7 +1249,7 @@ static ssize_t stm_fts_cmd_show(struct device *dev,
 			goto END;
 		}
 #ifdef CONFIG_DRM
-		res = drm_unregister_client(&info->notifier);
+		res = msm_drm_unregister_client(&info->notifier);
 		if (res < 0) {
 			logError(1, "%s ERROR: unregister notifier failed!\n",
 				 tag);
@@ -1457,7 +1475,7 @@ static ssize_t stm_fts_cmd_show(struct device *dev,
 
 	}
 #ifdef CONFIG_DRM
-	if (drm_register_client(&info->notifier) < 0) {
+	if (msm_drm_register_client(&info->notifier) < 0) {
 		logError(1, "%s ERROR: register notifier failed!\n", tag);
 	}
 #endif
@@ -3122,7 +3140,9 @@ static void fts_nop_event_handler(struct fts_ts_info *info,
 
 #ifdef CONFIG_FTS_FOD_AREA_REPORT
 static bool fts_is_in_fodarea(int x, int y)
-{
+{	
+	if (!fts_info)
+		return false;
 	if ((x > FOD_LX && x < FOD_LX + FOD_SIDE) && (y > FOD_LY && y < FOD_LY +
 	FOD_SIDE))
 		return true;
@@ -3238,14 +3258,13 @@ static void fts_enter_pointer_event_handler(struct fts_ts_info *info,
 #ifdef CONFIG_FTS_FOD_AREA_REPORT
 		if (fts_is_in_fodarea(x, y) && !(info->fod_id & ~(1 << touchId))) {
 			__set_bit(touchId, &info->sleep_finger);
-			if (info->fod_status) {
+			if (fts_fingerprint_is_enable()) {
 				info->fod_x = x;
 				info->fod_y = y;
 				info->fod_coordinate_update = true;
 				__set_bit(touchId, &info->fod_id);
 				input_report_abs(info->input_dev, ABS_MT_WIDTH_MINOR, info->fod_overlap);
-				logError(1,	"%s  %s :  FOD Press :%d, fod_id:%08x\n", tag, __func__,
-				touchId, info->fod_id);
+				logError(1,	"%s  %s :  FOD Press :%d, fod_id:%08x\n", tag, __func__, touchId, info->fod_id);
 			}
 		} else if (__test_and_clear_bit(touchId, &info->fod_id)) {
 			input_report_abs(info->input_dev, ABS_MT_WIDTH_MINOR, 0);
@@ -4639,7 +4658,7 @@ static int fts_init_sensing(struct fts_ts_info *info)
 {
 	int error = 0;
 #ifdef CONFIG_DRM
-	error |= drm_register_client(&info->notifier);
+	error |= msm_drm_register_client(&info->notifier);
 #endif
 	error |= fts_interrupt_install(info);
 	error |= fts_mode_handler(info, 0);
@@ -5337,9 +5356,42 @@ static void fts_cmd_update_work(struct work_struct *work)
 	return;
 }
 
+static int fts_set_fod_status(int value)
+{
+	int res = 0;
+	u8 gesture_cmd[6] = {0xA2, 0x03, 0x00, 0x00, 0x00, 0x03};
+
+	fts_info->fod_status = value;
+	if (fts_info->fod_status == 2) {
+		mutex_lock(&fts_info->fod_mutex);
+		res = fts_write(gesture_cmd, ARRAY_SIZE(gesture_cmd));
+		if (res < OK)
+			logError(1, "%s %s: enter gesture and longpress failed! ERROR %08X recovery in senseOff...\n",
+			tag, __func__, res);
+		else
+			logError(1, "%s %s send gesture and longpress cmd success\n", tag, __func__);
+		mutex_unlock(&fts_info->fod_mutex);
+	}
+	return res;
+}
+
+static int fts_set_aod_status(int value)
+{
+	fts_info->aod_status = value;
+	return 0;
+}
+
 static int fts_set_cur_value(int mode, int value)
 {
-
+	logError(1, "%s %s, mode:%d,value:%d\n", tag, __func__, mode, value);
+	if (mode == Touch_Fod_Enable && fts_info && value >= 0)
+		return fts_set_fod_status(value);
+	if (mode == Touch_Aod_Enable && fts_info && value >= 0)
+		return fts_set_aod_status(value);
+	if (mode == Touch_Doubletap_Mode && fts_info && value >= 0) {
+		fts_info->gesture_enabled = value;
+		return 0;
+	}
 	if (mode < Touch_Mode_NUM && mode >= 0) {
 
 		xiaomi_touch_interfaces.touch_mode[mode][SET_CUR_VALUE] = value;
@@ -5594,7 +5646,7 @@ static int fts_drm_state_chg_callback(struct notifier_block *nb,
 {
 	struct fts_ts_info *info =
 	    container_of(nb, struct fts_ts_info, notifier);
-	struct drm_notify_data *evdata = data;
+	struct msm_drm_notifier *evdata = data;
 	unsigned int blank;
 
 	logError(0, "%s %s: fts notifier begin!\n", tag, __func__);
@@ -5604,17 +5656,17 @@ static int fts_drm_state_chg_callback(struct notifier_block *nb,
 		blank = *(int *)(evdata->data);
 		logError(1, "%s %s: val:%lu,blank:%u\n", tag, __func__, val, blank);
 
-		if (val == DRM_EARLY_EVENT_BLANK && (blank == DRM_BLANK_POWERDOWN ||
-			blank == DRM_BLANK_LP1 || blank == DRM_BLANK_LP2)) {
+		if (val == MSM_DRM_EARLY_EVENT_BLANK && (blank == MSM_DRM_BLANK_POWERDOWN ||
+				blank == MSM_DRM_BLANK_LP1 || blank == MSM_DRM_BLANK_LP2)) {
 			if (info->sensor_sleep)
 				return NOTIFY_OK;
 
 			logError(1, "%s %s: FB_BLANK %s\n", tag,
-				 __func__, blank == DRM_BLANK_POWERDOWN ? "POWER DOWN" : "LP");
+				 __func__, blank == MSM_DRM_BLANK_POWERDOWN ? "POWER DOWN" : "LP");
 
 			flush_workqueue(info->event_wq);
 			queue_work(info->event_wq, &info->suspend_work);
-		} else if (val == DRM_EVENT_BLANK && blank == DRM_BLANK_UNBLANK) {
+		} else if (val == MSM_DRM_EVENT_BLANK && blank == MSM_DRM_BLANK_UNBLANK) {
 			if (!info->sensor_sleep)
 				return NOTIFY_OK;
 
@@ -6935,6 +6987,7 @@ static int fts_probe(struct spi_device *client)
 		error = -ENODEV;
 		goto ProbeErrorExit_6;
 	}
+	/*update_hardware_info(TYPE_TOUCH, 4);*/
 
 #ifdef CONFIG_SECURE_TOUCH
 	logError(1, "%s %s create secure touch file...\n", tag, __func__);
@@ -6979,6 +7032,7 @@ static int fts_probe(struct spi_device *client)
 			 info->lockdown_info[4], info->lockdown_info[5],
 			 info->lockdown_info[6], info->lockdown_info[7]);
 		info->lockdown_is_ok = true;
+		/*update_hardware_info(TYPE_TP_MAKER, info->lockdown_info[0] - 0x30); */
 	}
 
 #ifdef FW_UPDATE_ON_PROBE
@@ -7027,12 +7081,12 @@ static int fts_probe(struct spi_device *client)
 		tp_maker = NULL;
 	}
 	device_init_wakeup(&client->dev, 1);
-	init_completion(&info->pm_resume_completion);
-/*
+
 	if (backlight_register_notifier(&info->bl_notifier) < 0) {
 		logError(1, "%s register bl_notifier failed!\n", tag);
 	}
-*/
+
+	init_completion(&info->pm_resume_completion);
 #ifdef CONFIG_TOUCHSCREEN_ST_DEBUG_FS
 	info->debugfs = debugfs_create_dir("tp_debug", NULL);
 	if (info->debugfs) {
@@ -7140,7 +7194,7 @@ ProbeErrorExit_7:
 		kfree(info->dma_buf->wrBuf);
 #endif
 #ifdef CONFIG_DRM
-	drm_unregister_client(&info->notifier);
+	msm_drm_unregister_client(&info->notifier);
 #endif
 
 ProbeErrorExit_6:
@@ -7187,9 +7241,9 @@ static int fts_remove(struct spi_device *client)
 	sysfs_remove_group(&client->dev.kobj, &info->attrs);
 	/* remove interrupt and event handlers */
 	fts_interrupt_uninstall(info);
-	/*backlight_unregister_notifier(&info->bl_notifier);*/
+	backlight_unregister_notifier(&info->bl_notifier);
 #ifdef CONFIG_DRM
-	drm_unregister_client(&info->notifier);
+	msm_drm_unregister_client(&info->notifier);
 #endif
 
 	/* unregister the device */

@@ -28,6 +28,7 @@
 #include "kgsl_device.h"
 #include "kgsl_trace.h"
 #include "kgsl_gmu_core.h"
+#include "kgsl_trace_power.h"
 
 #define KGSL_PWRFLAGS_POWER_ON 0
 #define KGSL_PWRFLAGS_CLK_ON   1
@@ -491,6 +492,8 @@ void kgsl_pwrctrl_pwrlevel_change(struct kgsl_device *device,
 			pwr->active_pwrlevel, pwrlevel->gpu_freq,
 			pwr->previous_pwrlevel,
 			pwr->pwrlevels[old_level].gpu_freq);
+
+	trace_gpu_frequency(pwrlevel->gpu_freq/1000, 0);
 
 	/*
 	 * Some targets do not support the bandwidth requirement of
@@ -2304,7 +2307,7 @@ int kgsl_pwrctrl_init(struct kgsl_device *device)
 
 	/* Initialize the user and thermal clock constraints */
 
-	pwr->max_pwrlevel = 0;
+	pwr->max_pwrlevel = 3;
 	pwr->min_pwrlevel = pwr->num_pwrlevels - 2;
 	pwr->thermal_pwrlevel = 0;
 	pwr->thermal_pwrlevel_floor = pwr->min_pwrlevel;
@@ -2840,6 +2843,7 @@ _aware(struct kgsl_device *device)
 	case KGSL_STATE_RESET:
 		if (!gmu_core_gpmu_isenabled(device))
 			break;
+		kgsl_pwrctrl_irq(device, KGSL_PWRFLAGS_OFF);
 		status = gmu_core_start(device);
 		break;
 	case KGSL_STATE_INIT:
@@ -2904,6 +2908,7 @@ _aware(struct kgsl_device *device)
 				 * to make sure next attempt to wake up
 				 * GMU/GPU is indeed a fresh start.
 				 */
+				kgsl_pwrctrl_irq(device, KGSL_PWRFLAGS_OFF);
 				gmu_core_suspend(device);
 				kgsl_pwrctrl_set_state(device, state);
 			} else {
